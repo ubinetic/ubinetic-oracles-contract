@@ -1,0 +1,7 @@
+doc_out
+__pycache__/
+*.py[cod]
+out
+.DS_Store
+node_modules
+*_settings.py
