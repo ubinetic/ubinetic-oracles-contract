@@ -62,7 +62,7 @@ class PriceOracle(sp.Contract):
         
         response = sp.unpack(fulfill.payload, Response.get_type()).open_some()
 
-        sp.for certificate in response.certificates:
+        with sp.for_('certificate', response.certificates) as certificate:
             sp.verify(self.data.valid_certificates.contains(certificate))
 
         current_epoch = sp.local("current_epoch", response.timestamp / Constants.ORACLE_EPOCH_INTERVAL)
@@ -75,7 +75,7 @@ class PriceOracle(sp.Contract):
         with sp.if_(sp.len(self.data.valid_respondants) < self.data.response_threshold):
             with sp.if_(response.price == self.data.valid_response):    
                 self.data.valid_respondants.add(sp.source)
-        sp.else:
+        with sp.else_():
             sp.failwith(Errors.THRESHOLD_REACHED)
 
         with sp.if_(sp.len(self.data.valid_respondants) >= self.data.response_threshold):    
