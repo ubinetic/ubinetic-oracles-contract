@@ -7,45 +7,58 @@ class Response:
     def get_type():
         """The response type used for the price oracle that uses the generic data transmitter.
         """
-        return sp.TRecord(certificates=sp.TList(sp.TString),
-            timestamp=sp.TNat, 
-            source_count=sp.TNat, 
-            price=sp.TNat).layout(("certificates",("timestamp",("source_count","price"))))
+        return sp.TRecord(
+            timestamp=sp.TNat,
+            price=sp.TNat).layout(("timestamp","price"))
     
-    def make(certificates, timestamp, source_count, price):
+    def make(timestamp, price):
         """Courtesy function typing a record to Fulfill.get_type() for us
         """
-        return sp.set_type_expr(sp.record(certificates=certificates, 
+        return sp.set_type_expr(sp.record(
                 timestamp=timestamp,
-                source_count=source_count,
                 price=price), Response.get_type())
 
 
 class PriceOracle(sp.Contract):
-    def __init__(self):
+    def __init__(self, administrator):
         self.init(
-            price=sp.nat(5984600),
+            price=sp.nat(0),
             last_epoch=sp.nat(0),
             response_threshold=sp.nat(3),
-            source_count_threshold=sp.nat(2),
             validity_window_in_epochs=sp.nat(4),
             valid_script=sp.bytes("0x697066733a2f2f516d50367043416a5337525948383768573366454a754631524b6f75486a7a55674c5035694e61323853636b5533"),
             valid_response=sp.nat(0),
             valid_epoch=sp.nat(0),
             valid_respondants=sp.set([]),
-            valid_certificates = sp.set([
-                '80e4f8c906ba3218ba878cbeb55214dae70edd58b376b4367142875b8f7bb4b5',
-                'c72992167b41042bc7be1ccdd24e0e2f6301c851e293006d9cae69cca22539d7',
-                'e6edf32323d21bac574c4a7ad433e1c5b27d053e2d61fb2b7125129df6e3154e'
-            ]),
             valid_sources = sp.set([
                 sp.address("tz3S9uYxmGahffYfcYURijrCGm1VBqiH4mPe"),
                 sp.address("tz3YzXZtqPHuFyX7zxGpkxjAtoA1gnYQkEnL"),
                 sp.address("tz3Qg4gvJDj8f4hy3ewvb3wyxEXYXRYbZ6Mz"),
                 sp.address("tz3cXew4V1uXDtxuQde5iFSKpxoiF5udC3L1"),
                 sp.address("tz3UJN1ZMF7dAS9kJA3FQ5HTmZEpdpCgctjy")
-            ]) 
+            ]), 
+            administrator=administrator 
         )
+    
+    @sp.entry_point
+    def set_valid_script(self, script):
+        sp.verify(sp.sender==self.data.administrator, message=Errors.NOT_ADMIN)
+        self.data.valid_script = script
+
+    @sp.entry_point
+    def set_administrator(self, administrator):
+        sp.verify(sp.sender==self.data.administrator, message=Errors.NOT_ADMIN)
+        self.data.administrator = administrator
+    
+    @sp.entry_point
+    def add_valid_source(self, source):
+        sp.verify(sp.sender==self.data.administrator, message=Errors.NOT_ADMIN)
+        self.data.valid_sources.add(source)
+
+    @sp.entry_point
+    def remove_valid_source(self, source):
+        sp.verify(sp.sender==self.data.administrator, message=Errors.NOT_ADMIN)
+        self.data.valid_sources.remove(source)
 
     @sp.entry_point
     def fulfill(self, fulfill):
@@ -57,32 +70,29 @@ class PriceOracle(sp.Contract):
         """
         sp.set_type(fulfill, Fulfill.get_type())
 
-        sp.verify(self.data.valid_script == fulfill.script)
-        sp.verify(self.data.valid_sources.contains(sp.source))
+        sp.verify(self.data.valid_script == fulfill.script, message=Errors.INVALID_SCRIPT)
+        sp.verify(self.data.valid_sources.contains(sp.source), message=Errors.INVALID_SOURCE)
         
-        response = sp.unpack(fulfill.payload, Response.get_type()).open_some()
+        response = sp.local("response", sp.unpack(fulfill.payload, Response.get_type()).open_some())
 
-        with sp.for_('certificate', response.certificates) as certificate:
-            sp.verify(self.data.valid_certificates.contains(certificate))
+        current_epoch = sp.local("current_epoch", response.value.timestamp / Constants.ORACLE_EPOCH_INTERVAL)
 
-        current_epoch = sp.local("current_epoch", response.timestamp / Constants.ORACLE_EPOCH_INTERVAL)
-
-        with sp.if_((current_epoch.value != self.data.valid_epoch) & (response.source_count >= self.data.source_count_threshold)):
+        with sp.if_((current_epoch.value != self.data.valid_epoch)):
             self.data.valid_respondants = sp.set([])
             self.data.valid_epoch = current_epoch.value
-            self.data.valid_response = response.price
+            self.data.valid_response = response.value.price
 
         with sp.if_(sp.len(self.data.valid_respondants) < self.data.response_threshold):
-            with sp.if_(response.price == self.data.valid_response):    
+            with sp.if_(self.data.valid_response>>Constants.PRECISION_SHIFT >= abs(response.value.price - self.data.valid_response)):    
                 self.data.valid_respondants.add(sp.source)
         with sp.else_():
             sp.failwith(Errors.THRESHOLD_REACHED)
 
         with sp.if_(sp.len(self.data.valid_respondants) >= self.data.response_threshold):    
-            with sp.if_(self.data.price>>4 > abs(self.data.price-response.price)):
-                self.data.price = response.price
+            with sp.if_((self.data.price>>4 > abs(self.data.price-response.value.price)) | (self.data.price == 0)):
+                self.data.price = response.value.price
             with sp.else_():
-                with sp.if_(self.data.price-response.price>0):
+                with sp.if_(self.data.price-response.value.price>0):
                     self.data.price = sp.as_nat(self.data.price-(self.data.price>>4))
                 with sp.else_():
                     self.data.price = self.data.price+(self.data.price>>4)
@@ -99,7 +109,8 @@ class PriceOracle(sp.Contract):
         sp.set_type(callback, sp.TContract(sp.TNat))
         current_epoch = sp.as_nat(sp.now-sp.timestamp(0)) / Constants.ORACLE_EPOCH_INTERVAL
         sp.verify(self.data.last_epoch>sp.as_nat(current_epoch-self.data.validity_window_in_epochs), message=Errors.PRICE_TOO_OLD)
-        sp.transfer(sp.nat(Constants.PRECISION_FACTOR)//self.data.price, sp.mutez(0), callback)
+        sp.transfer(self.data.price, sp.mutez(0), callback)
+
 
  
 if "templates" not in __name__:
@@ -122,14 +133,10 @@ if "templates" not in __name__:
         scheduler = JobScheduler(administrator.address)
         scenario += scheduler
 
-        price_oracle = PriceOracle()
+        price_oracle = PriceOracle(administrator.address)
         scenario += price_oracle
 
         script=sp.bytes("0x697066733a2f2f516d50367043416a5337525948383768573366454a754631524b6f75486a7a55674c5035694e61323853636b5533")
-        valid_certificate1 = '80e4f8c906ba3218ba878cbeb55214dae70edd58b376b4367142875b8f7bb4b5'
-        valid_certificate2 = 'c72992167b41042bc7be1ccdd24e0e2f6301c851e293006d9cae69cca22539d7'
-        valid_certificate3 = 'e6edf32323d21bac574c4a7ad433e1c5b27d053e2d61fb2b7125129df6e3154e'
-        invalid_certificate = '00e4f8c906ba3218ba878cbeb55214dae70edd58b376b4367142875b8f7bb400'
         valid_executor1 = sp.address("tz3S9uYxmGahffYfcYURijrCGm1VBqiH4mPe")
         valid_executor2 = sp.address("tz3YzXZtqPHuFyX7zxGpkxjAtoA1gnYQkEnL")
         valid_executor3 = sp.address("tz3Qg4gvJDj8f4hy3ewvb3wyxEXYXRYbZ6Mz")
@@ -152,83 +159,122 @@ if "templates" not in __name__:
         scenario += scheduler.publish(job).run(sender=administrator.address)
 
         now=900
-        source_count = 2
         price=sp.nat(6000000)
-        certificates = [valid_certificate1, valid_certificate2, valid_certificate3]
-
+        
         scenario.h2("Response publishing")
         scenario.p("Only valid executors can publish a new price")
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=alice.address, source=alice.address, valid=False)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=alice.address, source=alice.address, valid=False)
         scenario.verify_equal(price_oracle.data.valid_response, sp.nat(0))
         scenario.p("Only valid executors can publish a new price")
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor1, source=valid_executor1)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor1, source=valid_executor1)
         scenario.verify_equal(price_oracle.data.valid_response, price)
 
         scenario.h2("Response Threshold")
         scenario.p("Same Executor only counts once")
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor1, source=valid_executor1)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor1, source=valid_executor1)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor1, source=valid_executor1)
-        scenario.verify_equal(price_oracle.data.price, sp.nat(5984600))
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor1, source=valid_executor1)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor1, source=valid_executor1)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor1, source=valid_executor1)
+        scenario.verify_equal(price_oracle.data.price, sp.nat(0))
 
-        scenario.p("Different Executor non-matching price does not count")
-        price=sp.nat(6000001)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor2, source=valid_executor2)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor3, source=valid_executor3)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor4, source=valid_executor4)
-        scenario.verify_equal(price_oracle.data.price, sp.nat(5984600))
-
-        scenario.p("Different Executor non-matching certificate does not count")
-        certificates = [valid_certificate1, valid_certificate2, invalid_certificate]
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor2, source=valid_executor2, valid=False)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor3, source=valid_executor3, valid=False)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor4, source=valid_executor4, valid=False)
-        scenario.verify_equal(price_oracle.data.price, sp.nat(5984600))
+        scenario.p("Different Executor non-matching (too big difference) price does not count")
+        price=sp.nat(6002000)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor2, source=valid_executor2)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor3, source=valid_executor3)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor4, source=valid_executor4)
+        scenario.verify_equal(price_oracle.data.price, sp.nat(0))
 
         scenario.p("Different Executor with all matching works")
         price=sp.nat(6000000)
-        certificates = [valid_certificate1, valid_certificate2, valid_certificate3]
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor2, source=valid_executor2)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor3, source=valid_executor3)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor2, source=valid_executor2)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor3, source=valid_executor3)
         scenario.verify_equal(price_oracle.data.price, price)
         
         scenario.p("Too many answers will not be allowed either")
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor4, source=valid_executor4, valid=False)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor4, source=valid_executor4, valid=False)
 
         scenario.p("Big price drop only impacts 6.25%")
-        certificates = [valid_certificate1, valid_certificate2, valid_certificate3]
         price=sp.nat(0)
         now=1800
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor2, source=valid_executor2)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor3, source=valid_executor3)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor4, source=valid_executor4)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor2, source=valid_executor2)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor3, source=valid_executor3)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor4, source=valid_executor4)
         scenario.verify_equal(price_oracle.data.price, 5625000)
 
         scenario.p("Big price increase only impacts 6.25%")
-        certificates = [valid_certificate1, valid_certificate2, valid_certificate3]
         price=sp.nat(90000000)
         now=4500
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor2, source=valid_executor2)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor3, source=valid_executor3)
-        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(certificates, now, source_count, price)))).run(sender=valid_executor4, source=valid_executor4)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor2, source=valid_executor2)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor3, source=valid_executor3)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor4, source=valid_executor4)
         scenario.verify_equal(price_oracle.data.price, 5976562)
+
+        scenario.p("Inaccurate but similar answers are accepted")
+        price=sp.nat(90000000)
+        now=Constants.ORACLE_EPOCH_INTERVAL*6
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price)))).run(sender=valid_executor2, source=valid_executor2)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price+1)))).run(sender=valid_executor3, source=valid_executor3)
+        scenario += scheduler.fulfill(Fulfill.make(script, sp.pack(Response.make(now, price+3)))).run(sender=valid_executor4, source=valid_executor4)
+        scenario.verify_equal(price_oracle.data.price, 6350097)
         
         viewer = Viewer()
         scenario += viewer
         return_contract = sp.contract(sp.TNat, viewer.address, entry_point="set_nat").open_some()
 
-        scenario.h2("make sure the base/quote flip works")
-        scenario += price_oracle.get_price(return_contract).run(sender=administrator.address, now=sp.timestamp(4500))
-        scenario.verify_equal(viewer.data.nat, Constants.PRECISION_FACTOR//5976562)
+    
 
         scenario.h2("get an old price")
-        now = sp.timestamp(Constants.ORACLE_EPOCH_INTERVAL*9)
+        now = sp.timestamp(Constants.ORACLE_EPOCH_INTERVAL*10)
         viewer = Viewer()
         scenario += viewer
         return_contract = sp.contract(
             sp.TNat, viewer.address, entry_point="set_nat").open_some()
-        scenario += price_oracle.get_price(return_contract).run(now=sp.timestamp(4500+60*60), sender=administrator.address, valid=False)
+        scenario += price_oracle.get_price(return_contract).run(now=now, sender=administrator.address, valid=False)
 
+
+        scenario.h2("only admin can set new script")
+        scenario += price_oracle.set_valid_script(sp.bytes("0x01")).run(sender=alice, valid=False)
+        scenario += price_oracle.set_valid_script(sp.bytes("0x02")).run(sender=administrator)
+        scenario.verify_equal(price_oracle.data.valid_script, sp.bytes("0x02"))
+
+        scenario.h2("only admin can set a new source")
+        scenario += price_oracle.add_valid_source(alice.address).run(sender=alice, valid=False)
+        scenario.verify_equal(price_oracle.data.valid_sources.contains(alice.address), False)
+        scenario.verify_equal(price_oracle.data.valid_sources.contains(bob.address), False)
+        scenario += price_oracle.add_valid_source(bob.address).run(sender=administrator)
+        scenario.verify_equal(price_oracle.data.valid_sources.contains(alice.address), False)
+        scenario.verify_equal(price_oracle.data.valid_sources.contains(bob.address), True)
+
+        scenario.h2("only admin can remove source")
+        scenario += price_oracle.remove_valid_source(bob.address).run(sender=alice, valid=False)
+        scenario.verify_equal(price_oracle.data.valid_sources.contains(alice.address), False)
+        scenario.verify_equal(price_oracle.data.valid_sources.contains(bob.address), True)
+        scenario += price_oracle.remove_valid_source(bob.address).run(sender=administrator)
+        scenario.verify_equal(price_oracle.data.valid_sources.contains(alice.address), False)
+        scenario.verify_equal(price_oracle.data.valid_sources.contains(bob.address), False)
+
+
+        scenario.h2("only admin can set admin")
+        scenario += price_oracle.set_administrator(alice.address).run(sender=alice, valid=False)
+        scenario += price_oracle.set_administrator(bob.address).run(sender=administrator)
+        scenario.verify_equal(price_oracle.data.administrator, bob.address)
+        scenario += price_oracle.set_administrator(administrator.address).run(sender=administrator, valid=False)
+        scenario += price_oracle.set_administrator(administrator.address).run(sender=bob)
+        scenario.verify_equal(price_oracle.data.administrator, administrator.address)
+
+    @sp.entry_point
+    def set_administrator(self, administrator):
+        sp.verify(sp.sender==self.data.administrator, message=Errors.NOT_ADMIN)
+        self.data.administrator = administrator
+    
+    @sp.entry_point
+    def add_valid_source(self, source):
+        sp.verify(sp.sender==self.data.administrator, message=Errors.NOT_ADMIN)
+        self.data.valid_sources.add(source)
+
+    @sp.entry_point
+    def remove_valid_source(self, source):
+        sp.verify(sp.sender==self.data.administrator, message=Errors.NOT_ADMIN)
+        self.data.valid_sources.remove(source)
 
 
 

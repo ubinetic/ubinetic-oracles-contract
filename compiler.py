@@ -9,7 +9,7 @@ def main():
     This file is used for compiling all contract such that the :obj:`oracles.deployment` module can then be used to deploy and wire everything.
     """
     sp.add_compilation_target("JobScheduler", JobScheduler(sp.address('tz1e3KTbvFmjfxjfse1RdEg2deoYjqoqgz83')))
-    sp.add_compilation_target("PriceOracle", PriceOracle())
+    sp.add_compilation_target("PriceOracle", PriceOracle(sp.address('tz1e3KTbvFmjfxjfse1RdEg2deoYjqoqgz83')))
     
 if __name__ == '__main__':
     main()
