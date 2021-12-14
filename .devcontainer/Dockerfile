@@ -15,4 +15,4 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
 # [Optional] Uncomment if you want to install more global node modules
 RUN pip3 install sphinx pytezos
 
-RUN su node -c "yes | sh <(curl -s  https://smartpy.io/releases/20211004-ea717461f93381b75961d6b3456cd114138f42c0/cli/install.sh)" 
+RUN su node -c "yes | bash <(curl -s  https://smartpy.io/releases/20211121-23e4d3e4c53d5a934a14ca6d8da4c336ddf3fbf5/cli/install.sh)" 
