@@ -45,7 +45,7 @@ def main():
     job_scheduler_address = get_address(operation_group.hash())
     print("done: '{}'".format(job_scheduler_address))
 
-    print("Deploy Proxies")
+    print("Deploy LegacyProxies")
     proxy_code = ContractInterface.from_file('out/LegacyProxyOracle/step_000_cont_2_contract.tz')
     storage = proxy_code.storage.dummy()
     storage['oracle'] = settings.SOURCE_ORACLE
@@ -55,5 +55,34 @@ def main():
         job_scheduler_address = get_address(operation_group.hash())
         print("done: '{}'".format(job_scheduler_address))
 
+    print("Deploy FlippedLegacyProxies")
+    proxy_code = ContractInterface.from_file('out/FlippedLegacyProxyOracle/step_000_cont_3_contract.tz')
+    storage = proxy_code.storage.dummy()
+    storage['oracle'] = settings.SOURCE_ORACLE
+    for symbol in settings.SYMBOLS:
+        storage['symbol'] = symbol
+        operation_group = pytezos_admin_client.origination(script=proxy_code.script(initial_storage=storage)).send()
+        job_scheduler_address = get_address(operation_group.hash())
+        print("done: '{}'".format(job_scheduler_address))
+
+    print("Deploy ProxyProxies")
+    proxy_code = ContractInterface.from_file('out/ProxyOracle/step_000_cont_4_contract.tz')
+    storage = proxy_code.storage.dummy()
+    storage['oracle'] = settings.SOURCE_ORACLE
+    for symbol in settings.SYMBOLS:
+        storage['symbol'] = symbol
+        operation_group = pytezos_admin_client.origination(script=proxy_code.script(initial_storage=storage)).send()
+        job_scheduler_address = get_address(operation_group.hash())
+        print("done: '{}'".format(job_scheduler_address))
+    
+    print("Deploy FlippedProxies")
+    proxy_code = ContractInterface.from_file('out/FlippedProxyOracle/step_000_cont_5_contract.tz')
+    storage = proxy_code.storage.dummy()
+    storage['oracle'] = settings.SOURCE_ORACLE
+    for symbol in settings.SYMBOLS:
+        storage['symbol'] = symbol
+        operation_group = pytezos_admin_client.origination(script=proxy_code.script(initial_storage=storage)).send()
+        job_scheduler_address = get_address(operation_group.hash())
+        print("done: '{}'".format(job_scheduler_address))
 if __name__ == '__main__':
     main()

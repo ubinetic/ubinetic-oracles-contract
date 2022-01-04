@@ -147,12 +147,44 @@ class PriceOracle(sp.Contract):
         sp.verify(self.data.last_epoch>sp.as_nat(current_epoch-self.data.validity_window_in_epochs), message=Errors.PRICE_TOO_OLD)
         sp.result(self.data.prices[symbol])
 
+class ProxyOracle(sp.Contract):
+    """This smart contract is used for retrocompatibility. It allows contracts that used the pre-onchain-view callback "get_price(cb)" 
+    entrypoint to read data from the new generic oracle that uses the onchain view standard. It's instantiated with the oracle's address
+    and symbol to request. 
+    """
+    def __init__(self, oracle, symbol, requires_flip=False):
+        self.requires_flip = requires_flip
+        self.init(
+            oracle=oracle,
+            symbol=symbol
+        )
+        
+    @sp.entry_point
+    def default(self):
+        """This is a dummy entrypoint in order to allow us to have the named "get_price" entrypoint (if a contract has only 
+        1 entrypoint it becomes not-named default otherwise).
+        """
+        sp.send(sp.sender, sp.amount)
+
+    @sp.onchain_view()
+    def get_price(self):
+        """this entrypoint can be called by everyone that provides a valid callback. Only if the price is not older than 4 epochs it will be returned.
+        IMPORTANT: some engines (i.e. uUSD engine) require for our use case the quote currency to be the collateral we are "flipping" base and quote 
+        by 1//"stored price" if the python variable self.requires_flip is set to True. This switch is evaluated at compiletime and will not be reflected
+        in the resulting michelson.
+        """
+        price = sp.view("get_price", self.data.oracle, self.data.symbol, t=sp.TNat).open_some(Errors.INVALID_VIEW)     
+        if self.requires_flip:  
+            sp.result(10**12//price)
+        else:
+            sp.result(price)
+
 class LegacyProxyOracle(sp.Contract):
     """This smart contract is used for retrocompatibility. It allows contracts that used the pre-onchain-view callback "get_price(cb)" 
     entrypoint to read data from the new generic oracle that uses the onchain view standard. It's instantiated with the oracle's address
     and symbol to request. 
     """
-    def __init__(self, oracle, symbol, requires_flip):
+    def __init__(self, oracle, symbol, requires_flip=False):
         self.requires_flip = requires_flip
         self.init(
             oracle=oracle,
