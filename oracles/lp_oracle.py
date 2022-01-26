@@ -113,7 +113,7 @@ if "templates" not in __name__:
 
         @sp.onchain_view()
         def get_price(self, symbol):
-            sp.set_type(symbol, sp.TAddress)
+            sp.set_type(symbol, sp.TString)
             sp.result(self.data.price)
 
     from utils.viewer import Viewer

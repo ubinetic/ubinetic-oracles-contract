@@ -35,7 +35,7 @@ def main():
     operation_group = pytezos_admin_client.origination(script=signed_oracle_code.script(initial_storage=storage)).send()
     target_oracle_address = get_address(operation_group.hash())
     print("done: '{}'".format(target_oracle_address))
-    
+    return
     print("Deploy JobScheduler")
     job_scheduler_code = ContractInterface.from_file('out/JobScheduler/step_000_cont_0_contract.tz')
     storage = job_scheduler_code.storage.dummy()
