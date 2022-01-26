@@ -22,17 +22,15 @@ def main():
             except:
                 pass
 
-    print("Starting Generic Oracledeployment...")
-    lp_oracle_code = ContractInterface.from_file('out/FlippedLPPriceOracle/step_000_cont_7_contract.tz')
-    storage = lp_oracle_code.storage.dummy()
+    print("Starting Relative Oracle deployment...")
+    relative_oracle_code = ContractInterface.from_file('out/RelativeProxyOracle/step_000_cont_8_contract.tz')
+    storage = relative_oracle_code.storage.dummy()
 
-    storage['lp_token_address'] = settings.LPT_ADDRESS
-    storage['lp_address'] = settings.LP_ADDRESS
-    storage['value_token_address'] = settings.VALUE_TOKEN_ADDRESS
-    storage['value_token_oracle_address'] = settings.VALUE_TOKEN_ORACLE_ADDRESS
-    storage['value_token_oracle_symbol'] = settings.VALUE_TOKEN_ORACLE_SYMBOL
+    storage['oracle'] = settings.SOURCE_ORACLE
+    storage['base_symbol'] = settings.BASE_SYMBOL
+    storage['quote_symbol'] = settings.QUOTE_SYMBOL
 
-    operation_group = pytezos_admin_client.origination(script=lp_oracle_code.script(initial_storage=storage)).send()
+    operation_group = pytezos_admin_client.origination(script=relative_oracle_code.script(initial_storage=storage)).send()
     target_oracle_address = get_address(operation_group.hash())
     print("done: '{}'".format(target_oracle_address))
 

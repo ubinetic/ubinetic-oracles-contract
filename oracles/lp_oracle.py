@@ -5,17 +5,22 @@ import oracles.errors as Errors
 class LPPriceOracle(sp.Contract):
     """
     """
-    def __init__(self, lp_token_address, lp_address, value_token_address, value_token_decimals, value_token_oracle_address, value_token_oracle_symbol):
+    def __init__(self, lp_token_address, lp_address, value_token_address, value_token_decimals, value_token_oracle_address, value_token_oracle_symbol, requires_flip=True):
         self.init(
             lpt_total_supply=sp.nat(0),            
             value_token_balance_of=sp.nat(0),
+            value_token_per_lpt_ratio=sp.nat(0),
+            last_update = sp.timestamp(0),
             lp_token_address=lp_token_address,
             lp_address=lp_address,
             value_token_address=value_token_address,
             value_token_oracle_address=value_token_oracle_address,
-            value_token_oracle_symbol=value_token_oracle_symbol
+            value_token_oracle_symbol=value_token_oracle_symbol,
+            
         )
         self.value_token_decimals = value_token_decimals
+        self.requires_flip = requires_flip
+        
     
     @sp.entry_point
     def set_lpt_total_supply(self, lpt_total_supply):
@@ -49,10 +54,25 @@ class LPPriceOracle(sp.Contract):
     def internal_get_price(self, callback):  
         sp.set_type(callback, sp.TContract(sp.TNat))
         sp.verify(sp.sender == sp.self_address, message=Errors.NOT_INTERNAL)
+        new_value_token_per_lpt_ratio = sp.local("new_value_token_per_lpt_ratio", self.data.value_token_balance_of*Constants.PRICE_PRECISION // self.data.lpt_total_supply)
+            
+        # we accept a max change of the ration of 3.125 per 15min because we have *2 multiplication
+        with sp.if_((self.data.value_token_per_lpt_ratio!=0)):
+            max_value_token_per_lpt_ratio_diff = sp.local("max_value_token_per_lpt_ratio_diff", (self.data.value_token_per_lpt_ratio>>5)*sp.min(sp.as_nat(sp.now-self.data.last_update), Constants.ORACLE_EPOCH_INTERVAL)//Constants.ORACLE_EPOCH_INTERVAL)
+            new_value_token_per_lpt_ratio_max = self.data.value_token_per_lpt_ratio + max_value_token_per_lpt_ratio_diff.value
+            new_value_token_per_lpt_ratio_min = sp.as_nat(self.data.value_token_per_lpt_ratio - max_value_token_per_lpt_ratio_diff.value)
+            self.data.value_token_per_lpt_ratio = sp.min(sp.max(new_value_token_per_lpt_ratio.value, new_value_token_per_lpt_ratio_min), new_value_token_per_lpt_ratio_max) 
+        with sp.else_():
+            self.data.value_token_per_lpt_ratio = new_value_token_per_lpt_ratio.value
 
-        value_token_per_lpt_ratio = self.data.value_token_balance_of*Constants.PRICE_PRECISION // self.data.lpt_total_supply
+        self.data.last_update = sp.now
+
         value_token_price = sp.view("get_price", self.data.value_token_oracle_address, self.data.value_token_oracle_symbol, t=sp.TNat).open_some(Errors.INVALID_VIEW)
-        sp.transfer(value_token_price*value_token_per_lpt_ratio*2//(Constants.PRICE_PRECISION * 10**self.value_token_decimals), sp.mutez(0), callback)
+        if self.requires_flip:  
+            sp.transfer((Constants.PRICE_PRECISION**3 * 10**self.value_token_decimals)//(value_token_price*self.data.value_token_per_lpt_ratio*2), sp.mutez(0), callback)
+        else:
+            sp.transfer((value_token_price*self.data.value_token_per_lpt_ratio*2)//(Constants.PRICE_PRECISION * 10**self.value_token_decimals), sp.mutez(0), callback)
+        
 
 if "templates" not in __name__:
     from utils.viewer import Viewer
@@ -62,8 +82,8 @@ if "templates" not in __name__:
             self.init(balance=balance)
 
         @sp.entry_point
-        def default(self):
-            pass
+        def setBalance(self, balance):
+            self.data.balance = balance
 
         @sp.entry_point
         def getBalance(self, parameters):
@@ -75,8 +95,8 @@ if "templates" not in __name__:
             self.init(total_supply=total_supply)
 
         @sp.entry_point
-        def default(self):
-            pass
+        def setTotalSupply(self, total_supply):
+            self.data.total_supply=total_supply 
 
         @sp.entry_point
         def getTotalSupply(self, parameters):
@@ -111,22 +131,135 @@ if "templates" not in __name__:
         scenario.h2("Accounts")
         scenario.show([administrator, alice, bob, dan])        
 
-        value_token = DummyValueToken(sp.nat(20775622511))
+        tzbtc_balance = sp.nat(20775622511)
+        value_token = DummyValueToken(tzbtc_balance)
         scenario += value_token
 
-        lp_token = DummyLPToken(sp.nat(177550279))
+        total_supply_lptoken = sp.nat(177550279)
+        lp_token = DummyLPToken(total_supply_lptoken)
         scenario += lp_token        
 
-        value_token_oracle = DummyOracle(sp.nat(47403660000))
+        bitcoin_price = sp.nat(47403660000)
+        value_token_oracle = DummyOracle(bitcoin_price)
         scenario += value_token_oracle
 
-        lp_price_oracle = LPPriceOracle(lp_token.address, administrator.address, value_token.address, 8, value_token_oracle.address, "BTC")
+        lp_price_oracle = LPPriceOracle(lp_token.address, administrator.address, value_token.address, 8, value_token_oracle.address, "BTC", requires_flip=False)
         scenario += lp_price_oracle
         
         viewer = Viewer()
         scenario += viewer
         return_contract = sp.contract(sp.TNat, viewer.address, entry_point="set_nat").open_some()
 
-        scenario.h2("Call get_price")
-        scenario += lp_price_oracle.get_price(return_contract)
+        now = sp.timestamp(Constants.ORACLE_EPOCH_INTERVAL*0)
 
+        scenario.h2("Call get_price unflipped")
+        scenario += lp_price_oracle.get_price(return_contract).run(now=now)
+        scenario.verify_equal(viewer.data.nat, 10**12//9014163)
+
+
+        scenario.h2("Call get_price flipped")
+        flipped_lp_price_oracle = LPPriceOracle(lp_token.address, administrator.address, value_token.address, 8, value_token_oracle.address, "BTC", requires_flip=True)
+        scenario += flipped_lp_price_oracle
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+        scenario.verify_equal(viewer.data.nat, 9014163)
+        
+
+        scenario.h2("Call get_price min boundary")
+        scenario.p("Simulate 50 impact down instant")
+        scenario += value_token.setBalance(sp.nat(20775622511)//2)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact down 1second")
+        now = sp.timestamp(1)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact down 30second")
+        now = sp.timestamp(30)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact down 15min")
+        now = sp.timestamp(Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact down 30min")
+        now = sp.timestamp(2*Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact down 60min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.h2("Call get_price max boundary")
+        scenario.p("Simulate 50 impact up instant")
+        scenario += value_token.setBalance(sp.nat(20775622511)*2)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact up 1second")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+1)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact up 30second")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+30)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact up 15min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact up 30min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+2*Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 50 impact up 60min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.h2("Call get_price below boundary")
+        scenario.p("Simulate 3.125 impact down instant")
+        scenario += value_token.setBalance(sp.nat(20716121970)+(20716121970>>5))
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact down 1second")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+1)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact down 30second")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+30)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact down 15min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact down 30min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+2*Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact down 60min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.h2("Call get_price above boundary")
+        scenario.p("Simulate 3.125 impact up instant")
+        scenario += value_token.setBalance(sp.nat(21363500781-(21363500781>>5)))
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact up 1second")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+1)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact up 30second")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+30)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact up 15min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact up 30min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+2*Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
+
+        scenario.p("Simulate 3.125 impact up 60min")
+        now = sp.timestamp(4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL+4*Constants.ORACLE_EPOCH_INTERVAL)
+        scenario += flipped_lp_price_oracle.get_price(return_contract).run(now=now)
